@@ -1,3 +1,6 @@
+// This file is part of the Workshop item content.
+// It implements the server-side logic for the MapTop HUD plugin.
+
 import { Entity, Instance } from "cs_script/point_script";
 
 const PANEL_ID = "MapTopPanel";
@@ -10,6 +13,13 @@ const ROWS = [
 ];
 
 let hudLayout = null;
+
+// Per-slot show epochs: each show increments the epoch of its own slot,
+// and a scheduled auto-hide only fires if no newer show happened for that
+// same slot. A global counter would break here: showing the panel to
+// several players in one tick (round-end) would cancel everyone's
+// auto-hide except the last one.
+let _showEpochs = {};
 
 // Data channel: numeric protocol via RunScriptInput input names.
 // Player name is sent by the plugin character-by-character (MapTopNameChar_<code>),
@@ -33,12 +43,23 @@ function GetHudLayout() {
     return hudLayout;
 }
 
+// Russian plural for "убийств(о/а)": 1 убийство, 2-4 убийства, 5-20 убийств...
+function KillsWord(k) {
+    let n = Math.abs(k) % 100;
+    if (n >= 11 && n <= 14) return "убийств";
+    n = n % 10;
+    if (n === 1) return "убийство";
+    if (n >= 2 && n <= 4) return "убийства";
+    return "убийств";
+}
+
 function SetRow(viewerSlot, rowIndex, place, name, kills) {
     let layout = GetHudLayout();
     if (layout == null) return;
     let varName = "row" + (rowIndex + 1);
-    layout.SetDialogVariableString(PANEL_ID, varName, place + ". " + name + " - " + kills);
-    Instance.Msg("MAPTOP_ROW_SET_v" + viewerSlot + "_r" + (rowIndex + 1) + " [" + name + " - " + kills + "]");
+    let text = place + ". " + name + " — " + kills + " " + KillsWord(kills);
+    layout.SetDialogVariableString(PANEL_ID, varName, text);
+    Instance.Msg("MAPTOP_ROW_SET_v" + viewerSlot + "_r" + (rowIndex + 1) + " [" + text + "]");
 }
 
 function ClearRow(viewerSlot, rowIndex) {
@@ -61,6 +82,23 @@ function ShowHud(viewerSlot) {
     Instance.Msg("MAPTOP_HUD_SHOW_v" + viewerSlot);
 }
 
+// Show with a guaranteed auto-hide after `seconds`, independent of the plugin:
+// even if the plugin is reloaded or its timer is lost, the panel hides itself.
+function ShowHudFor(viewerSlot, seconds) {
+    let layout = GetHudLayout();
+    if (layout == null) return;
+    _showEpochs[viewerSlot] = (_showEpochs[viewerSlot] || 0) + 1;
+    let epoch = _showEpochs[viewerSlot];
+    layout.SetHasClassForPlayer(viewerSlot, PANEL_ID, VISIBLE_CLASS, true);
+    Instance.Msg("MAPTOP_HUD_SHOW_v" + viewerSlot + "_for_" + seconds);
+    Instance.Delay(seconds).then(() => {
+        if (epoch === _showEpochs[viewerSlot]) {
+            layout.SetHasClassForPlayer(viewerSlot, PANEL_ID, VISIBLE_CLASS, false);
+            Instance.Msg("MAPTOP_HUD_AUTOHIDE_v" + viewerSlot);
+        }
+    });
+}
+
 function HideHud(viewerSlot) {
     let layout = GetHudLayout();
     if (layout == null) return;
@@ -75,11 +113,19 @@ for (let i = 0; i <= 63; i++) {
     // races with another player's show/hide through the shared _viewerSlot.
     Instance.OnScriptInput("MapTopShow_" + i, () => { ShowHud(i); });
     Instance.OnScriptInput("MapTopHide_" + i, () => { HideHud(i); });
+    // Show with guaranteed auto-hide: MapTopShowFor_<slot>_<seconds>
+    for (let s = 1; s <= 30; s++) {
+        let slot = i;
+        let sec = s;
+        Instance.OnScriptInput("MapTopShowFor_" + slot + "_" + sec, () => { ShowHudFor(slot, sec); });
+    }
 }
+
 for (let i = 0; i <= 9; i++) {
     Instance.OnScriptInput("MapTopPlace_" + i, () => { _place = i; });
     Instance.OnScriptInput("MapTopKillDigit_" + i, () => { _kills = _kills * 10 + i; });
 }
+
 // Name character codes: latin, cyrillic, punctuation (32..1279)
 for (let i = 32; i <= 1279; i++) {
     Instance.OnScriptInput("MapTopNameChar_" + i, () => { _nameCodes.push(i); });
@@ -107,9 +153,9 @@ Instance.OnScriptInput("MapTopTestStatic", () => {
         Instance.Msg("MAPTOP_TESTSTATIC_NO_LAYOUT");
         return;
     }
-    layout.SetDialogVariableString(PANEL_ID, "row1", "1. TestPlayer - 42");
-    layout.SetDialogVariableString(PANEL_ID, "row2", "2. TestPlayer2 - 33");
-    layout.SetDialogVariableString(PANEL_ID, "row3", "3. TestPlayer3 - 25");
+    layout.SetDialogVariableString(PANEL_ID, "row1", "1. TestPlayer — 42 убийства");
+    layout.SetDialogVariableString(PANEL_ID, "row2", "2. TestPlayer2 — 33 убийства");
+    layout.SetDialogVariableString(PANEL_ID, "row3", "3. TestPlayer3 — 25 убийств");
     Instance.Msg("MAPTOP_TESTSTATIC_VARS_SET");
     layout.SetHasClassForPlayer(0, PANEL_ID, VISIBLE_CLASS, false);
     Instance.Delay(0.1).then(() => {

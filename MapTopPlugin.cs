@@ -371,17 +371,8 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
             // Установить строки топа
             SendTopRows(viewerSlot, top);
 
-            // Показать HUD (слот зашит в имя входа — без гонок по общему состоянию)
-            TriggerHudInput($"MapTopShow_{viewerSlot}");
-
-            // Скрыть через duration
-            AddTimer(
-                duration,
-                () =>
-                {
-                    TriggerHudInput($"MapTopHide_{viewerSlot}");
-                },
-                TimerFlags.STOP_ON_MAPCHANGE);
+            // Показать HUD; скрытие гарантирует сам JS через duration
+            TriggerHudInput($"MapTopShowFor_{viewerSlot}_{duration}");
         }
     }
 
@@ -446,7 +437,7 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
             message.Append("<br>");
 
             message.Append(
-                $"{i + 1}. {name} — {stats.Kills}");
+                $"{i + 1}. {name} — {stats.Kills} {FormatKillsWord(stats.Kills)}");
         }
 
         player.PrintToCenterHtml(
@@ -466,17 +457,8 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
         // Установить строки топа через числовой протокол
         SendTopRows(viewerSlot, top);
 
-        // Показать HUD (слот зашит в имя входа — без гонок по общему состоянию)
-        TriggerHudInput($"MapTopShow_{viewerSlot}");
-
-        // Скрыть через duration
-        AddTimer(
-            duration,
-            () =>
-            {
-                TriggerHudInput($"MapTopHide_{viewerSlot}");
-            },
-            TimerFlags.STOP_ON_MAPCHANGE);
+        // Показать HUD; скрытие гарантирует сам JS через duration
+        TriggerHudInput($"MapTopShowFor_{viewerSlot}_{duration}");
     }
 
     private void SendTopRows(
@@ -648,6 +630,26 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
             return $"{player.Name} (вышел)";
 
         return player.Name;
+    }
+
+    // Russian plural: 1 убийство, 2-4 убийства, 5-20 убийств.
+    private static string FormatKillsWord(
+        int kills)
+    {
+        int n = Math.Abs(kills) % 100;
+
+        if (n >= 11 && n <= 14)
+            return "убийств";
+
+        n %= 10;
+
+        if (n == 1)
+            return "убийство";
+
+        if (n >= 2 && n <= 4)
+            return "убийства";
+
+        return "убийств";
     }
 
     private static int GetDisplayDuration(
