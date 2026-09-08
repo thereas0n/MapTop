@@ -4,6 +4,7 @@ MapTop — плагин на основе CounterStrikeSharp: топ убийс�
 
 Workshop item: https://steamcommunity.com/sharedfiles/filedetails/?id=3796805765
 Карта аддона: maptop_hud
+Видео с работой плагина: https://drive.google.com/file/d/1pdfqri_7viBJsYFWisPpvwKDp5d7ZOae/view?usp=drive_link
 
 Принцип работы:
 
