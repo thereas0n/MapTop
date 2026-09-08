@@ -1,0 +1,35 @@
+<root>
+    <styles>
+        <include src="s2r://panorama/styles/custom_game/maptop_hud.vcss_c" />
+    </styles>
+
+    <Panel class="MapTopRoot">
+
+        <Panel
+            id="MapTopPanel"
+            class="MapTopPanel">
+
+            <Label
+                id="MapTopTitle"
+                class="MapTopTitle"
+                text="ТОП КАРТЫ" />
+
+            <Label
+                id="MapTopRow1"
+                class="MapTopRow"
+                text="{s:row1}" />
+
+            <Label
+                id="MapTopRow2"
+                class="MapTopRow"
+                text="{s:row2}" />
+
+            <Label
+                id="MapTopRow3"
+                class="MapTopRow"
+                text="{s:row3}" />
+
+        </Panel>
+
+    </Panel>
+</root>

@@ -1,0 +1,53 @@
+.MapTopRoot
+{
+    width: 100%;
+    height: 100%;
+}
+
+.MapTopPanel
+{
+    width: 650px;
+
+    horizontal-align: center;
+    vertical-align: center;
+
+    background-color: rgba(10, 10, 14, 0.95);
+
+    padding: 30px;
+
+    flow-children: down;
+
+    visibility: collapse;
+}
+
+.MapTopPanel.MapTopVisible
+{
+    visibility: visible;
+}
+
+.MapTopTitle
+{
+    width: 100%;
+    height: 55px;
+
+    font-size: 32px;
+    font-weight: bold;
+
+    color: white;
+
+    text-align: center;
+}
+
+.MapTopRow
+{
+    width: 100%;
+    height: 55px;
+
+    margin-top: 5px;
+
+    font-size: 25px;
+
+    color: white;
+
+    text-align: left;
+}

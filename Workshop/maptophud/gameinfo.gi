@@ -1,0 +1,4 @@
+"GameInfo"
+{
+    "game" "MapTop HUD"
+}
