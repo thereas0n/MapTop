@@ -3,7 +3,9 @@ MapTop — плагин на основе CounterStrikeSharp: топ убийс�
 Плагин ведёт статистику убийств за текущую карту и показывает её двумя способами. Первый — обычный center HTML, работает на любой карте. Второй — собственный HUD-слой, доставляемый через Steam Workshop (custom_hud_layout), работает на карте maptop_hud, задействуя имеющиеся на нем сущности с худом из моего аддона. Логика подсчёта для обоих вариантов - общая, отличается только вывод.
 
 Workshop item: https://steamcommunity.com/sharedfiles/filedetails/?id=3796805765
+
 Карта аддона: maptop_hud
+
 Видео с работой плагина: https://drive.google.com/file/d/1pdfqri_7viBJsYFWisPpvwKDp5d7ZOae/view?usp=drive_link
 
 Принцип работы:
