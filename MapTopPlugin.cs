@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.IO;
+using System.Net;
 using System.Text;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
@@ -6,6 +7,7 @@ using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Timers;
+using CounterStrikeSharp.API.Modules.Utils;
 
 namespace MapTop;
 
@@ -13,7 +15,7 @@ namespace MapTop;
 public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
 {
     public override string ModuleName => "MapTop";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleAuthor => "thereason";
     public override string ModuleDescription =>
         "Kills leaderboard for the current map.";
@@ -22,11 +24,74 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
 
     private readonly Dictionary<ulong, PlayerMapStats> _players = new();
 
-    private CCSGameRules? _gameRules;
-    private bool _gameRulesInitialized;
+    private CBaseEntity? _hudLayoutEntity;
+    private CBaseEntity? _scriptEntity;
+    private bool _hudCreated;
 
-    private CBaseEntity? _mapTopScript;
-    private bool _mapTopScriptLookupDone;
+    private const string WorkshopAddonId = "3796805765";
+
+    private static readonly object DiagLock = new();
+    private string? _diagLogPath;
+
+    // GameDirectory указывает на .../game/csgo, а папка аддонов — сосед:
+    // .../game/csgo_addons. На Linux в момент Load() путь может быть
+    // пустым, поэтому резолвим лениво при первой записи.
+    private static string? ResolveDiagLogPath()
+    {
+        string? gameDir = Server.GameDirectory;
+
+        if (string.IsNullOrEmpty(gameDir))
+            return null;
+
+        string primary = Path.Combine(gameDir, "csgo_addons");
+        string? parent = Path.GetDirectoryName(
+            Path.TrimEndingDirectorySeparator(gameDir));
+
+        string candidate =
+            Directory.Exists(primary)
+                ? primary
+                : parent != null
+                    ? Path.Combine(parent, "csgo_addons")
+                    : primary;
+
+        try
+        {
+            Directory.CreateDirectory(candidate);
+        }
+        catch
+        {
+            return null;
+        }
+
+        return Path.Combine(candidate, "maptop_diagnostics.log");
+    }
+
+    // Консоль сервера недоступна по SFTP, поэтому все диагностические
+    // сообщения дублируются в файл рядом с csgo_addons — его можно
+    // забрать и прочитать после запуска сервера.
+    private void Diag(string message)
+    {
+        Server.PrintToConsole($"[MapTop] {message}");
+
+        try
+        {
+            _diagLogPath ??= ResolveDiagLogPath();
+
+            if (_diagLogPath == null)
+                return;
+
+            lock (DiagLock)
+            {
+                File.AppendAllText(
+                    _diagLogPath,
+                    $"{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z {message}{Environment.NewLine}");
+            }
+        }
+        catch
+        {
+            // Логирование не должно ронять плагин.
+        }
+    }
 
     public void OnConfigParsed(MapTopConfig config)
     {
@@ -50,6 +115,8 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
             config.HudMode = "center";
         }
 
+        config.HudSpawnGroup = config.HudSpawnGroup.Trim();
+
         Config = config;
     }
 
@@ -61,65 +128,301 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
         RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
-        RegisterListener<Listeners.OnTick>(OnTick);
 
-        if (hotReload)
+        // Чат-триггер: CSS превращает "!maptop" в вызов консольной команды
+        // "maptop". Атрибут выше регистрирует только css_maptop, поэтому
+        // регистрируем алиас maptop вручную — иначе !maptop из чата молчит.
+        AddCommand(
+            "maptop",
+            "Shows the top kills for the current map.",
+            OnMapTopCommand);
+
+        // Свежий файл диагностики на каждый запуск плагина.
+        try
         {
-            InitializeGameRules();
+            _diagLogPath = ResolveDiagLogPath();
+
+            if (_diagLogPath != null)
+            {
+                File.WriteAllText(
+                    _diagLogPath,
+                    $"{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}Z === MapTop plugin load, hotReload={hotReload} ==={Environment.NewLine}");
+            }
         }
+        catch
+        {
+            _diagLogPath = null;
+        }
+
+        Diag($"Config: HudMode={Config.HudMode} HudSpawnGroup='{Config.HudSpawnGroup}' " +
+             $"EnableDynamicHud={Config.EnableDynamicHud} WorkshopMapOnLoad={Config.WorkshopMapOnLoad}");
+
+        // ВРЕМЕННЫЙ тестовый триггер: нативная загрузка карты аддона.
+        if (Config.WorkshopMapOnLoad)
+        {
+            AddTimer(
+                5.0f,
+                () =>
+                {
+                    Diag($"Executing host_workshop_map {WorkshopAddonId}");
+                    Server.ExecuteCommand($"host_workshop_map {WorkshopAddonId}");
+                },
+                TimerFlags.STOP_ON_MAPCHANGE);
+        }
+
+        // После hot reload OnMapStart не стреляет, а сущности на текущей
+        // карте уже есть — перепривязываемся к ним.
+        StartHudBindingLoop(10);
     }
+
 
     public override void Unload(bool hotReload)
     {
         _players.Clear();
-
-        _gameRules = null;
-        _gameRulesInitialized = false;
     }
 
     private void OnMapStart(string mapName)
     {
         _players.Clear();
 
-        _gameRules = null;
-        _gameRulesInitialized = false;
+        // Сущности HUD живут на карте, после её смены ссылки протухают.
+        // Существующие entity удалять нельзя: на карте аддона они
+        // размещены в .vmap и принадлежат карте, а не плагину.
+        _hudCreated = false;
+        _hudLayoutEntity = null;
+        _scriptEntity = null;
 
-        _mapTopScript = null;
-        _mapTopScriptLookupDone = false;
+        Diag($"OnMapStart: {mapName}");
+
+        bool onAddonMap = string.Equals(
+            mapName,
+            Config.HudSpawnGroup,
+            StringComparison.OrdinalIgnoreCase);
+
+        if (!onAddonMap && Config.HudSpawnGroup.Length > 0)
+        {
+            // Сервер крутит стоковую карту: подгружаем entity-слой аддона
+            // (карта аддона содержит custom_hud_layout и point_script).
+            // Двухсекундная задержка даёт карте доиграть загрузку.
+            AddTimer(
+                2.0f,
+                () =>
+                {
+                    Diag($"Executing spawn_group_load {Config.HudSpawnGroup}");
+                    Server.ExecuteCommand($"spawn_group_load {Config.HudSpawnGroup}");
+                },
+                TimerFlags.STOP_ON_MAPCHANGE);
+        }
+
+        // Сущности появляются не мгновенно (spawn group грузится
+        // асинхронно), поэтому привязка повторяется несколько секунд.
+        StartHudBindingLoop(onAddonMap ? 10 : 20);
     }
 
-    private void InitializeGameRules()
+private void StartHudBindingLoop(int attemptsLeft)
     {
-        if (_gameRulesInitialized)
+        if (attemptsLeft <= 0 || _hudCreated)
             return;
 
-        CCSGameRulesProxy? gameRulesProxy =
-            Utilities
-                .FindAllEntitiesByDesignerName<CCSGameRulesProxy>(
-                    "cs_gamerules")
-                .FirstOrDefault();
+        AddTimer(
+            1.0f,
+            () =>
+            {
+                if (_hudCreated)
+                    return;
 
-        _gameRules =
-            gameRulesProxy?.GameRules;
+                SetupHudEntities();
 
-        _gameRulesInitialized =
-            _gameRules != null;
+                if (!_hudCreated)
+                    StartHudBindingLoop(attemptsLeft - 1);
+            },
+            TimerFlags.STOP_ON_MAPCHANGE);
     }
 
-    private void OnTick()
+    private void SetupHudEntities()
     {
-        if (!_gameRulesInitialized)
+        if (_hudCreated)
+            return;
+
+        // Сначала пробуем найти сущности, размещённые в карте аддона:
+        // это штатный путь, при котором ресурс-система резолвит
+        // cs_script и layout из смонтированного аддона.
+        if (TryBindMapEntities())
         {
-            InitializeGameRules();
+            _hudCreated = true;
+            Diag("HUD entities bound from map/spawn group.");
             return;
         }
 
-        if (_gameRules == null)
+        // Аварийный выключатель: позволяет изолировать краши,
+        // связанные с динамическим созданием сущностей.
+        if (!Config.EnableDynamicHud)
             return;
 
-        _gameRules.GameRestart =
-            _gameRules.RestartRoundTime <
-            Server.CurrentTime;
+        // Фоллбэк: создаём сущности сами. На стоковой карте без
+        // spawn group ресурс-система не видит аддон, поэтому этот
+        // путь считается запасным, а не основным.
+        var layoutKv = new CEntityKeyValues();
+        // Имя обязательно: maptop_hud.vjs ищет сущность через
+        // Instance.FindEntityByName("maptop_layout"). Без targetname
+        // скрипт не находит layout и молча не выводит ничего.
+        layoutKv.SetString("targetname", "maptop_layout");
+        layoutKv.SetString("layout", "panorama/layout/custom_game/maptop_hud.vxml");
+
+        CBaseEntity? hudLayoutEntity =
+            Utilities.CreateEntityByName<CBaseEntity>("custom_hud_layout");
+
+        if (hudLayoutEntity == null)
+        {
+            Diag("Failed to create custom_hud_layout.");
+            return;
+        }
+
+        _hudLayoutEntity = hudLayoutEntity;
+        _hudLayoutEntity.DispatchSpawn(layoutKv);
+
+        // Создаём сущность point_script для выполнения JS
+        var scriptKv = new CEntityKeyValues();
+        scriptKv.SetString("cs_script", "maps/scripts/maptop_hud.vjs");
+
+        CBaseEntity? scriptEntity =
+            Utilities.CreateEntityByName<CBaseEntity>("point_script");
+
+        if (scriptEntity == null)
+        {
+            Diag("Failed to create point_script.");
+            return;
+        }
+
+        _scriptEntity = scriptEntity;
+        _scriptEntity.DispatchSpawn(scriptKv);
+
+        _hudCreated = true;
+
+        Diag("Dynamic HUD entities created.");
+    }
+
+    private bool TryBindMapEntities()
+    {
+        List<CBaseEntity> layouts =
+            CollectEntities("custom_hud_layout");
+
+        List<CBaseEntity> scripts =
+            CollectEntities("point_script");
+
+        CBaseEntity? layout =
+            PickEntity(layouts, "maptop_layout", "custom_hud_layout");
+
+        CBaseEntity? script =
+            PickEntity(scripts, "maptop_script", "point_script");
+
+        if (layout == null || script == null)
+            return false;
+
+        _hudLayoutEntity = layout;
+        _scriptEntity = script;
+
+        return true;
+    }
+
+    private List<CBaseEntity> CollectEntities(string designerName)
+    {
+        var found = new List<CBaseEntity>();
+
+        foreach (
+            CBaseEntity entity
+            in Utilities.FindAllEntitiesByDesignerName<CBaseEntity>(
+                designerName))
+        {
+            if (!entity.IsValid)
+                continue;
+
+            string targetName = GetTargetName(entity);
+
+            Diag($"probe {designerName}: targetname='{targetName}'");
+            found.Add(entity);
+        }
+
+        return found;
+    }
+
+    // Сначала ищем по ожидаемому targetname. Если имён не знаем или они
+    // не совпали, но сущность типа ровно одна — берём её: на карте
+    // аддона других custom_hud_layout/point_script быть не может.
+    private CBaseEntity? PickEntity(
+        List<CBaseEntity> candidates,
+        string expectedTargetName,
+        string designerName)
+    {
+        if (candidates.Count == 0)
+        {
+            Diag($"no {designerName} entities found");
+            return null;
+        }
+
+        CBaseEntity? byName = candidates.FirstOrDefault(
+            entity => GetTargetName(entity) == expectedTargetName);
+
+        if (byName != null)
+            return byName;
+
+        if (candidates.Count == 1)
+        {
+            Diag(
+                $"{designerName}: single entity with targetname " +
+                $"'{GetTargetName(candidates[0])}', binding anyway");
+            return candidates[0];
+        }
+
+        Diag(
+            $"{designerName}: {candidates.Count} entities, none named " +
+            $"'{expectedTargetName}'");
+
+        return null;
+    }
+
+    private static string GetTargetName(CBaseEntity entity)
+    {
+        try
+        {
+            return entity.Entity?.Name ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    [ConsoleCommand(
+        "css_maptop_debug",
+        "Dumps MapTop HUD binding state and retries entity binding.")]
+    public void OnMapTopDebugCommand(
+        CCSPlayerController? player,
+        CommandInfo command)
+    {
+        command.ReplyToCommand(
+            $"[MapTop] HudMode={Config.HudMode} " +
+            $"HudSpawnGroup='{Config.HudSpawnGroup}' " +
+            $"EnableDynamicHud={Config.EnableDynamicHud}");
+
+        command.ReplyToCommand(
+            $"[MapTop] _hudCreated={_hudCreated} " +
+            $"layout={(_hudLayoutEntity != null && _hudLayoutEntity.IsValid ? "valid" : "null/invalid")} " +
+            $"script={(_scriptEntity != null && _scriptEntity.IsValid ? "valid" : "null/invalid")}");
+
+        Diag("css_maptop_debug: retrying entity binding");
+
+        if (TryBindMapEntities())
+        {
+            _hudCreated = true;
+            Diag("HUD entities bound from map/spawn group.");
+            command.ReplyToCommand("[MapTop] Binding OK: entities bound.");
+        }
+        else
+        {
+            command.ReplyToCommand(
+                "[MapTop] Binding failed: see [MapTop] probe lines above.");
+        }
     }
 
     [ConsoleCommand(
@@ -186,8 +489,13 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
         if (attacker.IsBot)
             return HookResult.Continue;
 
-        if (victim.IsBot)
+        // Убийства ботов по умолчанию не считаются. На сервере, где играет
+        // один человек против ботов, из-за этого топ остаётся пустым и обе
+        // ветки показа молчат. Если такой сервер нужен — включить
+        // CountBotKills в конфиге.
+        if (victim.IsBot && !Config.CountBotKills)
             return HookResult.Continue;
+
 
         if (attacker == victim)
             return HookResult.Continue;
@@ -401,10 +709,11 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
 
     private bool IsPanoramaHudAvailable()
     {
-        FindMapTopScript();
-
-        return _mapTopScript != null &&
-               _mapTopScript.IsValid;
+        return _hudCreated &&
+               _hudLayoutEntity != null &&
+               _hudLayoutEntity.IsValid &&
+               _scriptEntity != null &&
+               _scriptEntity.IsValid;
     }
 
     private void ShowTopToPlayerCenter(
@@ -514,69 +823,23 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
         }
     }
 
-    private void FindMapTopScript()
-    {
-        if (_mapTopScriptLookupDone)
-            return;
-
-        _mapTopScriptLookupDone = true;
-
-        _mapTopScript = Utilities
-            .FindAllEntitiesByDesignerName<CBaseEntity>(
-                "point_script")
-            .FirstOrDefault(entity =>
-                entity.IsValid &&
-                entity.Entity?.Name == "maptop_script");
-
-        if (_mapTopScript == null)
-        {
-            List<string> scriptNames =
-                Utilities
-                    .FindAllEntitiesByDesignerName<CBaseEntity>(
-                        "point_script")
-                    .Select(entity => entity.Entity?.Name ?? "<unnamed>")
-                    .ToList();
-
-            Server.PrintToConsole(
-                $"[MapTop] maptop_script NOT found. " +
-                $"point_script entities on map: [{string.Join(", ", scriptNames)}]");
-        }
-        else
-        {
-            Server.PrintToConsole(
-                "[MapTop] maptop_script entity found.");
-        }
-    }
-
-    private void TriggerHudInput(
-        string inputName)
+    private void TriggerHudInput(string inputName)
     {
         if (Config.HudMode != "panorama")
             return;
 
-        FindMapTopScript();
-
-        if (_mapTopScript != null &&
-            _mapTopScript.IsValid)
+        if (_scriptEntity is null || !_scriptEntity.IsValid)
         {
-            // Вход entity называется RunScriptInput, имя скрипт-входа передаётся
-            // в value (эквивалент "ent_fire maptop_script RunScriptInput <input>",
-            // который не работает из server console на выделенном сервере).
-            _mapTopScript.AcceptInput(
-                "RunScriptInput",
-                activator: null,
-                caller: _mapTopScript,
-                value: inputName);
-
+            // Фоллбек на center, если сущности не созданы
             return;
         }
 
-        // Запасной путь: консольная команда (работает локально в Hammer).
-        Server.PrintToConsole(
-            $"[MapTop] maptop_script not found, falling back to ent_fire for '{inputName}'.");
-
-        Server.ExecuteCommand(
-            $"ent_fire maptop_script RunScriptInput {inputName}");
+        // Отправляем вход на point_script, который выполнит JS
+        _scriptEntity.AcceptInput(
+            "RunScriptInput",
+            activator: null,
+            caller: _scriptEntity,
+            value: inputName);
     }
 
     private List<PlayerMapStats> GetTop(

@@ -2,3 +2,13 @@ bin/
 obj/
 *.user
 .vs/
+
+# build/deploy artifacts
+MapTop.dll
+rc_build/
+server_upload/
+
+# local debug dumps and scratch tools
+_api_*.txt
+final_check.txt
+tools/
