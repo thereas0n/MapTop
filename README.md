@@ -4,7 +4,7 @@ MapTop — плагин на основе CounterStrikeSharp: топ убийс�
 
 Workshop item: https://steamcommunity.com/sharedfiles/filedetails/?id=3796805765
 Аддон: resource-only — только файлы панорамы (layout/style), без карты и без скриптов
-Видео с работой плагина: https://drive.google.com/file/d/1pdfqri_7viBJsYFWisPpvwKDp5d7ZOae/view?usp=drive_link
+Видео с работой плагина: https://drive.google.com/file/d/19RQU7LjtuQ5-ieh1WSQurI8fEuL5Xhkm/view?usp=sharing
 
 Принцип работы:
 
