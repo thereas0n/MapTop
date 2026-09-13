@@ -14,6 +14,5 @@
     [
         "panorama/layout/custom_game/maptop_hud.vxml"
         "panorama/styles/custom_game/maptop_hud.vcss"
-        "panorama/scripts/custom_game/maptop_hud.js"
     ]
 }
