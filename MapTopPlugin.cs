@@ -751,7 +751,6 @@ public sealed class MapTopPlugin : BasePlugin, IPluginConfig<MapTopConfig>
         PlayerMapStats stats =
             new()
             {
-                SteamId = steamId,
                 Name = player.PlayerName,
                 Kills = 0,
                 HasLeft = false
